@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import signal
 import sys
 import threading
@@ -22,6 +23,27 @@ from .vision import SNAP_DIR, analyze_current_frame, clear_vision_history, jpeg_
 
 ROOT = Path('/home/pi/spac3-gh0st')
 WEB = ROOT / 'web'
+
+
+def load_env_file(path: Path) -> None:
+    """Load KEY=VALUE lines from a .env file into os.environ (real env vars win)."""
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip().removeprefix('export ').strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_env_file(ROOT / '.env')
 EVENTS = []
 LAST_CHATTER = 0
 LAST_PLUGIN_PANELS = []
@@ -73,6 +95,25 @@ GODSEYE_API_PREFIXES = (
     '/api/overpass', '/api/route', '/api/terrain/heights', '/api/adsbdb'
 )
 GODSEYE_DEV_PREFIXES = ('/@vite/', '/src/', '/node_modules/', '/cesium/', '/pin.svg', '/location.svg', '/visual-presets.svg')
+
+
+def serve_godseye_config(handler):
+    """Hand the God's Eye View globe its API keys from the environment / .env.
+
+    The keys are not stored in the repo: set GOOGLE_MAPS_API_KEY and CESIUM_ION_TOKEN
+    in .env (see .env.example). The globe still loads without them, minus Google
+    geocoding/photorealistic tiles and Cesium ion assets.
+    """
+    body = (
+        f"window.__GOOGLE_MAPS_API_KEY__ = {json.dumps(os.environ.get('GOOGLE_MAPS_API_KEY', ''))};\n"
+        f"window.__CESIUM_ION_TOKEN__ = {json.dumps(os.environ.get('CESIUM_ION_TOKEN', ''))};\n"
+    ).encode('utf-8')
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'application/javascript; charset=utf-8')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 def proxy_godseye(handler, upstream_path: str, rewrite_html: bool = False):
@@ -291,6 +332,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         self._godseye_query = parsed.query
+        if path == '/godseye-app/config.js':
+            return serve_godseye_config(self)
         if path == '/godseye-live' or path == '/godseye-live/':
             return proxy_godseye(self, '/', rewrite_html=True)
         if path.startswith('/godseye-live/'):
